@@ -1,133 +1,29 @@
 import gc
-import re
 import base64
 import io
 import logging
 import threading
-import zipfile
 import requests
 import os
+from datetime import datetime, date
 from flask import Flask, request, jsonify
 from openpyxl import load_workbook
-from openpyxl.drawing.image import Image as XLImage
 from openpyxl.utils import get_column_letter
-from openpyxl.styles import Font
-from PIL import Image as PILImage
+import xlsxwriter
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 
-STYLE_COL       = 2
-IMAGE_COL       = "A"
-ROW_HEIGHT_PT   = 72
-COL_A_WIDTH     = 18
+STYLE_COL_IDX   = 0        # Style is column A (index 0) in original file
+IMAGE_COL_WIDTH = 18       # Excel character units
+ROW_HEIGHT_PT   = 72       # Points (1 inch)
 IMAGE_URL_BASE  = "https://app.townleygirl.com/Image/preview/"
 REQUEST_TIMEOUT = 6
-ROW_HEIGHT_PX   = int(ROW_HEIGHT_PT * 96 / 72)   # 96px
-COL_A_WIDTH_PX  = int(COL_A_WIDTH * 7)            # 126px
-PADDING_PX      = 2
-
-def fix_image_anchors(xlsx_bytes):
-    """
-    Converts oneCellAnchor → twoCellAnchor with editAs='twoCell'
-    = 'Move and size with cells' in Excel Format Picture dialog.
-
-    KEY FIX: openpyxl uses NO namespace prefix in drawing XML.
-    Tags are <oneCellAnchor> NOT <xdr:oneCellAnchor>.
-    Previous code was matching wrong prefix — this is now corrected.
-    """
-    try:
-        in_buf  = io.BytesIO(xlsx_bytes)
-        out_buf = io.BytesIO()
-
-        with zipfile.ZipFile(in_buf, 'r') as zin, \
-             zipfile.ZipFile(out_buf, 'w', zipfile.ZIP_DEFLATED) as zout:
-
-            for item in zin.infolist():
-                data = zin.read(item.filename)
-
-                if 'drawings/drawing' in item.filename and item.filename.endswith('.xml'):
-                    try:
-                        xml_str = data.decode('utf-8')
-
-                        def convert_anchor(match):
-                            content = match.group(1)
-
-                            # ✅ No prefix — openpyxl uses default namespace
-                            from_m = re.search(r'<from>(.*?)</from>', content, re.DOTALL)
-                            if not from_m:
-                                return match.group(0)
-
-                            from_content = from_m.group(1)
-                            col_m = re.search(r'<col>(\d+)</col>', from_content)
-                            row_m = re.search(r'<row>(\d+)</row>', from_content)
-
-                            if not col_m or not row_m:
-                                return match.group(0)
-
-                            from_col = int(col_m.group(1))
-                            from_row = int(row_m.group(1))
-
-                            # Clean from — zero offsets
-                            new_from = (
-                                f'<from>'
-                                f'<col>{from_col}</col><colOff>0</colOff>'
-                                f'<row>{from_row}</row><rowOff>0</rowOff>'
-                                f'</from>'
-                            )
-
-                            # Add to — next col + row = fills 1 cell exactly
-                            new_to = (
-                                f'<to>'
-                                f'<col>{from_col + 1}</col><colOff>0</colOff>'
-                                f'<row>{from_row + 1}</row><rowOff>0</rowOff>'
-                                f'</to>'
-                            )
-
-                            content = (
-                                content[:from_m.start()] +
-                                new_from + new_to +
-                                content[from_m.end():]
-                            )
-
-                            # Remove <ext .../> — not used in twoCellAnchor
-                            content = re.sub(r'\s*<ext[^>]*/>', '', content)
-
-                            # ✅ editAs="twoCell" = "Move and size with cells"
-                            return f'<twoCellAnchor editAs="twoCell">{content}</twoCellAnchor>'
-
-                        before = xml_str.count('<oneCellAnchor>')
-                        xml_str = re.sub(
-                            r'<oneCellAnchor>(.*?)</oneCellAnchor>',
-                            convert_anchor,
-                            xml_str,
-                            flags=re.DOTALL
-                        )
-                        after = xml_str.count('<twoCellAnchor')
-                        logging.info(f"Anchors fixed: {before} oneCellAnchor → {after} twoCellAnchor ✅")
-                        data = xml_str.encode('utf-8')
-
-                    except Exception as e:
-                        logging.warning(f"Drawing XML fix skipped: {e}")
-
-                zout.writestr(item, data)
-
-        out_buf.seek(0)
-        result = out_buf.read()
-
-        if result.startswith(b'PK\x03\x04'):
-            logging.info(f"Anchor fix complete ✅ size: {len(result)} bytes")
-            return result
-        else:
-            logging.warning("Anchor fix produced invalid zip — using original")
-            return xlsx_bytes
-
-    except Exception as e:
-        logging.warning(f"Anchor fix failed — using original: {e}")
-        return xlsx_bytes
+IMG_MAX_PX      = 300      # Max image dimension for storage quality
 
 def download_and_resize(style_str):
     try:
+        from PIL import Image as PILImage
         resp = requests.get(
             f"{IMAGE_URL_BASE}{style_str}",
             timeout=REQUEST_TIMEOUT,
@@ -137,21 +33,20 @@ def download_and_resize(style_str):
         raw = io.BytesIO(resp.content)
         del resp
         with PILImage.open(raw) as img:
-            img    = img.convert("RGB")
+            img  = img.convert("RGB")
             ow, oh = img.size
-            max_w  = COL_A_WIDTH_PX - (PADDING_PX * 2)
-            max_h  = ROW_HEIGHT_PX  - (PADDING_PX * 2)
-            scale  = min(max_w / ow, max_h / oh)
-            nw     = max(1, int(ow * scale))
-            nh     = max(1, int(oh * scale))
-            img    = img.resize((nw, nh), PILImage.LANCZOS)
-            buf    = io.BytesIO()
+            # Resize to max IMG_MAX_PX while keeping aspect ratio
+            scale = min(IMG_MAX_PX / ow, IMG_MAX_PX / oh, 1.0)
+            nw    = max(1, int(ow * scale))
+            nh    = max(1, int(oh * scale))
+            img   = img.resize((nw, nh), PILImage.LANCZOS)
+            buf   = io.BytesIO()
             img.save(buf, format="PNG", optimize=True, compress_level=6)
             buf.seek(0)
-            return buf.getvalue(), nw, nh
+            return buf.getvalue()
     except Exception as e:
         logging.warning(f"Image failed for {style_str}: {e}")
-        return None, 0, 0
+        return None
     finally:
         gc.collect()
 
@@ -159,92 +54,143 @@ def process_and_callback(excel_bytes, filename, callback_url):
     try:
         logging.info(f"Received file size: {len(excel_bytes)} bytes")
 
+        # ── STEP 1: Read source data with openpyxl ──────────────────────────
         wb = load_workbook(io.BytesIO(excel_bytes))
         ws = wb.active
         del excel_bytes
         gc.collect()
 
-        # ✅ Guard: skip already-processed files
+        # Guard: skip already-processed files
         if ws['A1'].value and str(ws['A1'].value).strip().lower() == "image":
             logging.warning("File already processed — skipping")
             return
 
-        # ✅ Insert Image column at position 1
-        ws.insert_cols(1)
-        ws['A1'] = "Image"
+        # Read headers from row 1
+        headers = [cell.value for cell in ws[1]]
+        num_cols = len(headers)
 
-        # ✅ Bold all header cells
-        for cell in ws[1]:
-            cell.font = Font(bold=True)
+        # Read all data rows
+        all_rows = []
+        for row in ws.iter_rows(min_row=2, max_row=ws.max_row, values_only=True):
+            if any(v is not None for v in row):
+                all_rows.append(list(row))
 
-        # ✅ Freeze header row
-        ws.freeze_panes = "A2"
-
-        # ✅ Set Image column fixed width
-        ws.column_dimensions[IMAGE_COL].width = COL_A_WIDTH
-
-        processed = 0
-        skipped   = 0
-
-        for row_idx in range(2, ws.max_row + 1):
-            style_val = ws.cell(row=row_idx, column=STYLE_COL).value
-            if style_val is None or str(style_val).strip() == "":
-                continue
-
-            style_str       = str(style_val).strip()
-            img_bytes, w, h = download_and_resize(style_str)
-
-            if img_bytes is None:
-                skipped += 1
-                continue
-
-            try:
-                xl_img        = XLImage(io.BytesIO(img_bytes))
-                xl_img.width  = COL_A_WIDTH_PX
-                xl_img.height = ROW_HEIGHT_PX
-                xl_img.anchor = f"A{row_idx}"
-                ws.add_image(xl_img)
-                ws.row_dimensions[row_idx].height = ROW_HEIGHT_PT
-                processed += 1
-            except Exception as e:
-                logging.warning(f"Embed failed for {style_str}: {e}")
-                skipped += 1
-            finally:
-                del img_bytes
-                gc.collect()
-
-        # ✅ Auto-width all columns
-        for col_idx in range(1, ws.max_column + 1):
-            col_letter = get_column_letter(col_idx)
-            if col_letter == IMAGE_COL:
-                ws.column_dimensions[col_letter].width = COL_A_WIDTH
-                continue
-            max_length = 0
-            for cell in ws[col_letter]:
-                if cell.value:
-                    max_length = max(max_length, len(str(cell.value)))
-            ws.column_dimensions[col_letter].width = min(max_length + 4, 50)
-
-        # ✅ Auto filter
-        last_col           = get_column_letter(ws.max_column)
-        ws.auto_filter.ref = f"A1:{last_col}{ws.max_row}"
-
-        # ✅ Save
-        logging.info("Saving workbook...")
-        out_buf = io.BytesIO()
-        wb.save(out_buf)
-        out_buf.seek(0)
-        output_bytes = out_buf.read()
         del wb
         gc.collect()
+
+        # Sort A→Z by Style column
+        all_rows.sort(key=lambda r: (
+            r[STYLE_COL_IDX] is None,
+            str(r[STYLE_COL_IDX]).lower() if r[STYLE_COL_IDX] else ""
+        ))
+        logging.info(f"Read {len(all_rows)} rows, sorted by Style A→Z ✅")
+
+        # ── STEP 2: Download all images ──────────────────────────────────────
+        logging.info("Downloading images...")
+        images = {}
+        for row_data in all_rows:
+            style_val = row_data[STYLE_COL_IDX]
+            if style_val:
+                style_str = str(style_val).strip()
+                if style_str and style_str not in images:
+                    images[style_str] = download_and_resize(style_str)
+
+        processed = sum(1 for v in images.values() if v is not None)
+        skipped   = sum(1 for v in images.values() if v is None)
+        logging.info(f"Images: {processed} downloaded, {skipped} failed ✅")
+
+        # ── STEP 3: Calculate column widths ──────────────────────────────────
+        col_widths = []
+        for col_idx in range(num_cols):
+            max_len = len(str(headers[col_idx])) if headers[col_idx] else 0
+            for row_data in all_rows:
+                if col_idx < len(row_data) and row_data[col_idx] is not None:
+                    max_len = max(max_len, len(str(row_data[col_idx])))
+            col_widths.append(min(max_len + 4, 50))
+
+        # ── STEP 4: Build output xlsx with XlsxWriter ────────────────────────
+        logging.info("Building xlsx with XlsxWriter embed_image()...")
+        out_buf  = io.BytesIO()
+        workbook = xlsxwriter.Workbook(out_buf, {'in_memory': True})
+        sheet    = workbook.add_worksheet()
+
+        # Formats
+        bold_fmt = workbook.add_format({
+            'bold'      : True,
+            'font_name' : 'Calibri',
+            'font_size' : 11
+        })
+        cell_fmt = workbook.add_format({
+            'font_name' : 'Calibri',
+            'font_size' : 11
+        })
+        date_fmt = workbook.add_format({
+            'font_name'  : 'Calibri',
+            'font_size'  : 11,
+            'num_format' : 'mm/dd/yyyy'
+        })
+        num_fmt = workbook.add_format({
+            'font_name' : 'Calibri',
+            'font_size' : 11
+        })
+
+        # ── STEP 5: Write header row ─────────────────────────────────────────
+        # Column 0 = Image (new), columns 1..N = original headers
+        sheet.write(0, 0, "Image", bold_fmt)
+        for col_idx, header in enumerate(headers):
+            sheet.write(0, col_idx + 1, header if header is not None else "", bold_fmt)
+
+        # ── STEP 6: Set column widths ─────────────────────────────────────────
+        sheet.set_column(0, 0, IMAGE_COL_WIDTH)   # Image column fixed width
+        for col_idx, width in enumerate(col_widths):
+            sheet.set_column(col_idx + 1, col_idx + 1, width)
+
+        # ── STEP 7: Write data rows with embedded images ──────────────────────
+        for row_idx, row_data in enumerate(all_rows, start=1):
+
+            # Set row height
+            sheet.set_row(row_idx, ROW_HEIGHT_PT)
+
+            # ✅ Embed image as true in-cell image (sorts + filters with data)
+            style_val = row_data[STYLE_COL_IDX]
+            if style_val:
+                style_str = str(style_val).strip()
+                img_bytes = images.get(style_str)
+                if img_bytes:
+                    try:
+                        sheet.embed_image(row_idx, 0, "image.png", {
+                            'image_data': io.BytesIO(img_bytes)
+                        })
+                    except Exception as e:
+                        logging.warning(f"embed_image failed for {style_str}: {e}")
+
+            # Write data values (col offset +1 for Image column)
+            for col_idx, value in enumerate(row_data):
+                dest_col = col_idx + 1
+                if value is None:
+                    sheet.write_blank(row_idx, dest_col, None, cell_fmt)
+                elif isinstance(value, bool):
+                    sheet.write_boolean(row_idx, dest_col, value, cell_fmt)
+                elif isinstance(value, (datetime, date)):
+                    sheet.write_datetime(row_idx, dest_col, value, date_fmt)
+                elif isinstance(value, (int, float)):
+                    sheet.write_number(row_idx, dest_col, value, num_fmt)
+                else:
+                    sheet.write_string(row_idx, dest_col, str(value), cell_fmt)
+
+        # ── STEP 8: Freeze header row + auto filter ───────────────────────────
+        sheet.freeze_panes(1, 0)
+        sheet.autofilter(0, 0, len(all_rows), num_cols)
+
+        # ── STEP 9: Save ──────────────────────────────────────────────────────
+        workbook.close()
+        out_buf.seek(0)
+        output_bytes = out_buf.read()
 
         if output_bytes.startswith(b'PK\x03\x04'):
             logging.info(f"Output xlsx VALID ✅ size: {len(output_bytes)} bytes")
         else:
             logging.error("Output xlsx INVALID ❌")
-
-        # ✅ Fix anchors — oneCellAnchor → twoCellAnchor (no xdr: prefix)
-        output_bytes = fix_image_anchors(output_bytes)
 
         result_b64 = base64.b64encode(output_bytes).decode("utf-8")
         logging.info(f"Base64 length: {len(result_b64)}")
@@ -254,6 +200,7 @@ def process_and_callback(excel_bytes, filename, callback_url):
         if not filename.lower().endswith(".xlsx"):
             filename = filename + ".xlsx"
 
+        # ── STEP 10: Callback to Flow 2 ───────────────────────────────────────
         payload = {
             "file"      : result_b64,
             "filename"  : filename,
