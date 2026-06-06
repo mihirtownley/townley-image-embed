@@ -55,7 +55,7 @@ def download_and_resize(style_str):
 
 def process_and_callback(excel_bytes, filename, callback_url):
     try:
-        # ✅ Step 1 — Log received file size for debugging
+        # ✅ Log received file size
         logging.info(f"Received file size: {len(excel_bytes)} bytes")
 
         wb = load_workbook(io.BytesIO(excel_bytes))
@@ -63,10 +63,10 @@ def process_and_callback(excel_bytes, filename, callback_url):
         del excel_bytes
         gc.collect()
 
-        # ✅ Step 2 — Freeze header row
+        # ✅ Freeze header row (Row 1 stays fixed when scrolling)
         ws.freeze_panes = "A2"
 
-        # ✅ Step 3 — Set column B width
+        # ✅ Set column B width
         ws.column_dimensions[IMAGE_COL].width = COL_B_WIDTH
 
         processed = 0
@@ -99,11 +99,11 @@ def process_and_callback(excel_bytes, filename, callback_url):
                 del img_bytes
                 gc.collect()
 
-        # ✅ Step 4 — Apply auto filter
+        # ✅ Apply auto filter across full data range
         last_col           = get_column_letter(ws.max_column)
         ws.auto_filter.ref = f"A1:{last_col}{ws.max_row}"
 
-        # ✅ Step 5 — Save workbook
+        # ✅ Save workbook
         logging.info("Saving workbook...")
         out_buf = io.BytesIO()
         wb.save(out_buf)
@@ -113,11 +113,11 @@ def process_and_callback(excel_bytes, filename, callback_url):
         del wb
         gc.collect()
 
-        # ✅ Step 6 — Ensure .xlsx extension
+        # ✅ Ensure .xlsx extension on filename
         if not filename.lower().endswith(".xlsx"):
             filename = filename + ".xlsx"
 
-        # ✅ Step 7 — Callback to Flow 2
+        # ✅ Callback to Power Automate Flow 2
         payload = {
             "file"      : result_b64,
             "filename"  : filename,
@@ -146,13 +146,22 @@ def embed_images():
         return jsonify({"error": "CALLBACK_URL not configured"}), 500
 
     try:
+        # ✅ First decode
         excel_bytes = base64.b64decode(excel_b64)
+        logging.info(f"Decoded excel_bytes size: {len(excel_bytes)} bytes")
+
+        # ✅ Auto-detect double base64 encoding
+        # Valid xlsx/zip files always start with PK magic bytes (0x50 0x4B)
+        # If first decode gives base64 text instead of xlsx binary, decode again
+        if not excel_bytes.startswith(b'PK\x03\x04'):
+            logging.info("Detected double base64 encoding — decoding again...")
+            excel_bytes = base64.b64decode(excel_bytes)
+            logging.info(f"Double decoded size: {len(excel_bytes)} bytes, valid xlsx: {excel_bytes.startswith(b'PK')}")
+
     except Exception as e:
         return jsonify({"error": f"Base64 decode failed: {e}"}), 422
 
-    # ✅ Log decoded size immediately
-    logging.info(f"Decoded excel_bytes size: {len(excel_bytes)} bytes")
-
+    # ✅ Respond instantly — process in background thread
     thread = threading.Thread(
         target=process_and_callback,
         args=(excel_bytes, filename, callback_url),
