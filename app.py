@@ -14,14 +14,14 @@ from PIL import Image as PILImage
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 
-STYLE_COL       = 1
-IMAGE_COL       = "B"
+STYLE_COL       = 2        # ✅ Style is now column B after inserting Image column
+IMAGE_COL       = "A"      # ✅ Images go in new column A
 ROW_HEIGHT_PT   = 60
-COL_B_WIDTH     = 12
+COL_A_WIDTH     = 12
 IMAGE_URL_BASE  = "https://app.townleygirl.com/Image/preview/"
 REQUEST_TIMEOUT = 6
 ROW_HEIGHT_PX   = int(ROW_HEIGHT_PT * 96 / 72)
-COL_B_WIDTH_PX  = int(COL_B_WIDTH * 7)
+COL_A_WIDTH_PX  = int(COL_A_WIDTH * 7)
 PADDING_PX      = 4
 
 def download_and_resize(style_str):
@@ -37,7 +37,7 @@ def download_and_resize(style_str):
         with PILImage.open(raw) as img:
             img    = img.convert("RGB")
             ow, oh = img.size
-            max_w  = COL_B_WIDTH_PX - (PADDING_PX * 2)
+            max_w  = COL_A_WIDTH_PX - (PADDING_PX * 2)
             max_h  = ROW_HEIGHT_PX  - (PADDING_PX * 2)
             scale  = min(max_w / ow, max_h / oh, 1.0)
             nw     = max(1, int(ow * scale))
@@ -62,16 +62,21 @@ def process_and_callback(excel_bytes, filename, callback_url):
         del excel_bytes
         gc.collect()
 
+        # ✅ Insert new Image column at position 1 (shifts all existing columns right)
+        ws.insert_cols(1)
+        ws['A1'] = "Image"
+
         # ✅ Freeze header row
         ws.freeze_panes = "A2"
 
-        # ✅ Set column B width
-        ws.column_dimensions[IMAGE_COL].width = COL_B_WIDTH
+        # ✅ Set Image column width
+        ws.column_dimensions[IMAGE_COL].width = COL_A_WIDTH
 
         processed = 0
         skipped   = 0
 
         for row_idx in range(2, ws.max_row + 1):
+            # ✅ Style is now in column 2 (B) after insert
             style_val = ws.cell(row=row_idx, column=STYLE_COL).value
             if style_val is None or str(style_val).strip() == "":
                 continue
@@ -87,7 +92,7 @@ def process_and_callback(excel_bytes, filename, callback_url):
                 xl_img        = XLImage(io.BytesIO(img_bytes))
                 xl_img.width  = w
                 xl_img.height = h
-                xl_img.anchor = f"B{row_idx}"
+                xl_img.anchor = f"A{row_idx}"   # ✅ Images in column A
                 ws.add_image(xl_img)
                 ws.row_dimensions[row_idx].height = ROW_HEIGHT_PT
                 processed += 1
@@ -98,7 +103,7 @@ def process_and_callback(excel_bytes, filename, callback_url):
                 del img_bytes
                 gc.collect()
 
-        # ✅ Apply auto filter
+        # ✅ Apply auto filter across full data range
         last_col           = get_column_letter(ws.max_column)
         ws.auto_filter.ref = f"A1:{last_col}{ws.max_row}"
 
