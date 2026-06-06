@@ -1,8 +1,10 @@
 import gc
+import re
 import base64
 import io
 import logging
 import threading
+import zipfile
 import requests
 import os
 from flask import Flask, request, jsonify
@@ -23,7 +25,114 @@ IMAGE_URL_BASE  = "https://app.townleygirl.com/Image/preview/"
 REQUEST_TIMEOUT = 6
 ROW_HEIGHT_PX   = int(ROW_HEIGHT_PT * 96 / 72)
 COL_A_WIDTH_PX  = int(COL_A_WIDTH * 7)
-PADDING_PX      = 4
+PADDING_PX      = 2
+
+def fix_image_anchors(xlsx_bytes):
+    """
+    Post-process xlsx to convert oneCellAnchor → twoCellAnchor(twoCell)
+    so images FILL cells and HIDE when rows are filtered.
+    Uses only Python built-ins (zipfile + re) — no lxml needed.
+    """
+    try:
+        in_buf  = io.BytesIO(xlsx_bytes)
+        out_buf = io.BytesIO()
+
+        with zipfile.ZipFile(in_buf, 'r') as zin, \
+             zipfile.ZipFile(out_buf, 'w', zipfile.ZIP_DEFLATED) as zout:
+
+            for item in zin.infolist():
+                data = zin.read(item.filename)
+
+                if 'drawings/drawing' in item.filename and item.filename.endswith('.xml'):
+                    try:
+                        xml_str = data.decode('utf-8')
+
+                        def convert_anchor(match):
+                            content = match.group(1)
+
+                            # Extract <xdr:from> element
+                            from_m = re.search(
+                                r'<xdr:from>(.*?)</xdr:from>',
+                                content, re.DOTALL
+                            )
+                            if not from_m:
+                                return match.group(0)
+
+                            from_content = from_m.group(1)
+                            col_m = re.search(r'<xdr:col>(\d+)</xdr:col>', from_content)
+                            row_m = re.search(r'<xdr:row>(\d+)</xdr:row>', from_content)
+
+                            if not col_m or not row_m:
+                                return match.group(0)
+
+                            from_col = int(col_m.group(1))
+                            from_row = int(row_m.group(1))
+
+                            # ✅ New from — zero offsets (image starts at cell corner)
+                            new_from = (
+                                f'<xdr:from>'
+                                f'<xdr:col>{from_col}</xdr:col>'
+                                f'<xdr:colOff>0</xdr:colOff>'
+                                f'<xdr:row>{from_row}</xdr:row>'
+                                f'<xdr:rowOff>0</xdr:rowOff>'
+                                f'</xdr:from>'
+                            )
+
+                            # ✅ New to — next col + row (fills exactly 1 cell)
+                            new_to = (
+                                f'<xdr:to>'
+                                f'<xdr:col>{from_col + 1}</xdr:col>'
+                                f'<xdr:colOff>0</xdr:colOff>'
+                                f'<xdr:row>{from_row + 1}</xdr:row>'
+                                f'<xdr:rowOff>0</xdr:rowOff>'
+                                f'</xdr:to>'
+                            )
+
+                            # Replace old from with new from + to
+                            content = (
+                                content[:from_m.start()] +
+                                new_from + new_to +
+                                content[from_m.end():]
+                            )
+
+                            # Remove <xdr:ext .../> (not used in twoCellAnchor)
+                            content = re.sub(r'\s*<xdr:ext[^>]*/>', '', content)
+
+                            return (
+                                f'<xdr:twoCellAnchor editAs="twoCell">'
+                                f'{content}'
+                                f'</xdr:twoCellAnchor>'
+                            )
+
+                        xml_str = re.sub(
+                            r'<xdr:oneCellAnchor>(.*?)</xdr:oneCellAnchor>',
+                            convert_anchor,
+                            xml_str,
+                            flags=re.DOTALL
+                        )
+
+                        data = xml_str.encode('utf-8')
+                        logging.info("Drawing anchors → twoCellAnchor ✅")
+
+                    except Exception as e:
+                        logging.warning(f"Drawing XML fix skipped: {e}")
+
+                zout.writestr(item, data)
+
+        out_buf.seek(0)
+        result = out_buf.read()
+
+        if result.startswith(b'PK\x03\x04'):
+            logging.info(f"Anchor fix complete ✅ size: {len(result)} bytes")
+            return result
+        else:
+            logging.warning("Anchor fix produced invalid zip — using original")
+            return xlsx_bytes
+
+    except Exception as e:
+        logging.warning(f"Anchor fix failed — using original: {e}")
+        return xlsx_bytes
+
 
 def download_and_resize(style_str):
     try:
@@ -40,7 +149,7 @@ def download_and_resize(style_str):
             ow, oh = img.size
             max_w  = COL_A_WIDTH_PX - (PADDING_PX * 2)
             max_h  = ROW_HEIGHT_PX  - (PADDING_PX * 2)
-            scale  = min(max_w / ow, max_h / oh, 1.0)
+            scale  = min(max_w / ow, max_h / oh)
             nw     = max(1, int(ow * scale))
             nh     = max(1, int(oh * scale))
             img    = img.resize((nw, nh), PILImage.LANCZOS)
@@ -54,6 +163,7 @@ def download_and_resize(style_str):
     finally:
         gc.collect()
 
+
 def process_and_callback(excel_bytes, filename, callback_url):
     try:
         logging.info(f"Received file size: {len(excel_bytes)} bytes")
@@ -63,24 +173,23 @@ def process_and_callback(excel_bytes, filename, callback_url):
         del excel_bytes
         gc.collect()
 
-        # ✅ GUARD: Skip if already processed (Image column already exists)
-        # This prevents the output email from being re-processed by Flow 1
+        # ✅ Guard: skip already-processed files
         if ws['A1'].value and str(ws['A1'].value).strip().lower() == "image":
-            logging.warning("File already has Image column — skipping to prevent duplicate processing")
+            logging.warning("File already processed — skipping")
             return
 
-        # ✅ Insert new Image column at position 1
+        # ✅ Insert Image column at position 1
         ws.insert_cols(1)
         ws['A1'] = "Image"
 
-        # ✅ Bold all header cells in row 1
+        # ✅ Bold all header cells
         for cell in ws[1]:
             cell.font = Font(bold=True)
 
         # ✅ Freeze header row
         ws.freeze_panes = "A2"
 
-        # ✅ Set Image column (A) to fixed width
+        # ✅ Set Image column fixed width
         ws.column_dimensions[IMAGE_COL].width = COL_A_WIDTH
 
         processed = 0
@@ -100,8 +209,11 @@ def process_and_callback(excel_bytes, filename, callback_url):
 
             try:
                 xl_img        = XLImage(io.BytesIO(img_bytes))
-                xl_img.width  = w
-                xl_img.height = h
+
+                # ✅ Set image to FULL cell size (twoCellAnchor will fill the cell)
+                xl_img.width  = COL_A_WIDTH_PX
+                xl_img.height = ROW_HEIGHT_PX
+
                 xl_img.anchor = f"A{row_idx}"
                 ws.add_image(xl_img)
                 ws.row_dimensions[row_idx].height = ROW_HEIGHT_PT
@@ -116,47 +228,44 @@ def process_and_callback(excel_bytes, filename, callback_url):
         # ✅ Auto-width all columns based on content
         for col_idx in range(1, ws.max_column + 1):
             col_letter = get_column_letter(col_idx)
-
-            # Column A is the Image column — keep fixed width
             if col_letter == IMAGE_COL:
                 ws.column_dimensions[col_letter].width = COL_A_WIDTH
                 continue
-
-            # All other columns — auto fit based on max content length
             max_length = 0
             for cell in ws[col_letter]:
                 if cell.value:
                     max_length = max(max_length, len(str(cell.value)))
-
-            # Add padding, cap at 50 to avoid extremely wide columns
             ws.column_dimensions[col_letter].width = min(max_length + 4, 50)
 
-        # ✅ Apply auto filter across full data range
+        # ✅ Auto filter
         last_col           = get_column_letter(ws.max_column)
         ws.auto_filter.ref = f"A1:{last_col}{ws.max_row}"
 
-        # ✅ Save and validate output
+        # ✅ Save
         logging.info("Saving workbook...")
         out_buf = io.BytesIO()
         wb.save(out_buf)
         out_buf.seek(0)
         output_bytes = out_buf.read()
+        del wb
+        gc.collect()
 
         if output_bytes.startswith(b'PK\x03\x04'):
             logging.info(f"Output xlsx VALID ✅ size: {len(output_bytes)} bytes")
         else:
-            logging.error(f"Output xlsx INVALID ❌ starts with: {output_bytes[:4].hex()}")
+            logging.error("Output xlsx INVALID ❌")
+
+        # ✅ Fix anchors: oneCellAnchor → twoCellAnchor for fill + filter behavior
+        output_bytes = fix_image_anchors(output_bytes)
 
         result_b64 = base64.b64encode(output_bytes).decode("utf-8")
         logging.info(f"Base64 length: {len(result_b64)}")
-        del wb, output_bytes
+        del output_bytes
         gc.collect()
 
-        # ✅ Ensure .xlsx extension
         if not filename.lower().endswith(".xlsx"):
             filename = filename + ".xlsx"
 
-        # ✅ Callback to Flow 2
         payload = {
             "file"      : result_b64,
             "filename"  : filename,
@@ -168,6 +277,7 @@ def process_and_callback(excel_bytes, filename, callback_url):
 
     except Exception as e:
         logging.error(f"Background processing failed: {e}", exc_info=True)
+
 
 @app.route("/embed_images", methods=["POST"])
 def embed_images():
@@ -185,11 +295,9 @@ def embed_images():
         return jsonify({"error": "CALLBACK_URL not configured"}), 500
 
     try:
-        # ✅ First decode
         excel_bytes = base64.b64decode(excel_b64)
         logging.info(f"Decoded excel_bytes size: {len(excel_bytes)} bytes")
 
-        # ✅ Loop until valid xlsx found
         for attempt in range(4):
             if excel_bytes.startswith(b'PK\x03\x04'):
                 logging.info(f"Valid xlsx after {attempt + 1} decode(s), size: {len(excel_bytes)} bytes")
@@ -211,12 +319,14 @@ def embed_images():
 
     return jsonify({"status": "accepted", "message": "Processing started"}), 202
 
+
 @app.route("/", methods=["GET"])
 def health_check():
     return jsonify({
         "status"  : "Townley Image Embedder is Live",
         "endpoint": "/embed_images (POST only)"
     }), 200
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
