@@ -102,14 +102,21 @@ def process_and_callback(excel_bytes, filename, callback_url):
         last_col           = get_column_letter(ws.max_column)
         ws.auto_filter.ref = f"A1:{last_col}{ws.max_row}"
 
-        # ✅ Save workbook
+        # ✅ Save and validate output
         logging.info("Saving workbook...")
         out_buf = io.BytesIO()
         wb.save(out_buf)
         out_buf.seek(0)
-        result_b64 = base64.b64encode(out_buf.read()).decode("utf-8")
-        logging.info(f"Saved. Base64 length: {len(result_b64)}")
-        del wb
+        output_bytes = out_buf.read()
+
+        if output_bytes.startswith(b'PK\x03\x04'):
+            logging.info(f"Output xlsx VALID ✅ size: {len(output_bytes)} bytes")
+        else:
+            logging.error(f"Output xlsx INVALID ❌ starts with: {output_bytes[:4].hex()}")
+
+        result_b64 = base64.b64encode(output_bytes).decode("utf-8")
+        logging.info(f"Base64 length: {len(result_b64)}")
+        del wb, output_bytes
         gc.collect()
 
         # ✅ Ensure .xlsx extension
@@ -149,22 +156,19 @@ def embed_images():
         excel_bytes = base64.b64decode(excel_b64)
         logging.info(f"Decoded excel_bytes size: {len(excel_bytes)} bytes")
 
-        # ✅ Loop until valid xlsx found — handles any encoding depth
-        # Valid xlsx/zip always starts with PK magic bytes (0x50 0x4B 0x03 0x04)
+        # ✅ Loop until valid xlsx (handles any encoding depth)
         for attempt in range(4):
             if excel_bytes.startswith(b'PK\x03\x04'):
-                logging.info(f"Valid xlsx confirmed after {attempt + 1} decode(s), size: {len(excel_bytes)} bytes")
+                logging.info(f"Valid xlsx after {attempt + 1} decode(s), size: {len(excel_bytes)} bytes")
                 break
-            logging.info(f"Attempt {attempt + 1}: not valid xlsx yet (starts with {excel_bytes[:4]}), decoding again...")
+            logging.info(f"Attempt {attempt + 1}: starts with {excel_bytes[:4]}, decoding again...")
             excel_bytes = base64.b64decode(excel_bytes)
         else:
-            logging.error("Could not find valid xlsx after 4 decode attempts")
-            return jsonify({"error": "Could not decode xlsx file after 4 attempts"}), 422
+            return jsonify({"error": "Could not decode xlsx after 4 attempts"}), 422
 
     except Exception as e:
         return jsonify({"error": f"Base64 decode failed: {e}"}), 422
 
-    # ✅ Respond instantly — process in background
     thread = threading.Thread(
         target=process_and_callback,
         args=(excel_bytes, filename, callback_url),
