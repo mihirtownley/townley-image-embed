@@ -9,13 +9,14 @@ from flask import Flask, request, jsonify
 from openpyxl import load_workbook
 from openpyxl.drawing.image import Image as XLImage
 from openpyxl.utils import get_column_letter
+from openpyxl.styles import Font
 from PIL import Image as PILImage
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 
-STYLE_COL       = 2        # ✅ Style is now column B after inserting Image column
-IMAGE_COL       = "A"      # ✅ Images go in new column A
+STYLE_COL       = 2
+IMAGE_COL       = "A"
 ROW_HEIGHT_PT   = 60
 COL_A_WIDTH     = 12
 IMAGE_URL_BASE  = "https://app.townleygirl.com/Image/preview/"
@@ -62,21 +63,30 @@ def process_and_callback(excel_bytes, filename, callback_url):
         del excel_bytes
         gc.collect()
 
-        # ✅ Insert new Image column at position 1 (shifts all existing columns right)
+        # ✅ GUARD: Skip if already processed (Image column already exists)
+        # This prevents the output email from being re-processed by Flow 1
+        if ws['A1'].value and str(ws['A1'].value).strip().lower() == "image":
+            logging.warning("File already has Image column — skipping to prevent duplicate processing")
+            return
+
+        # ✅ Insert new Image column at position 1
         ws.insert_cols(1)
         ws['A1'] = "Image"
+
+        # ✅ Bold all header cells in row 1
+        for cell in ws[1]:
+            cell.font = Font(bold=True)
 
         # ✅ Freeze header row
         ws.freeze_panes = "A2"
 
-        # ✅ Set Image column width
+        # ✅ Set Image column (A) to fixed width
         ws.column_dimensions[IMAGE_COL].width = COL_A_WIDTH
 
         processed = 0
         skipped   = 0
 
         for row_idx in range(2, ws.max_row + 1):
-            # ✅ Style is now in column 2 (B) after insert
             style_val = ws.cell(row=row_idx, column=STYLE_COL).value
             if style_val is None or str(style_val).strip() == "":
                 continue
@@ -92,7 +102,7 @@ def process_and_callback(excel_bytes, filename, callback_url):
                 xl_img        = XLImage(io.BytesIO(img_bytes))
                 xl_img.width  = w
                 xl_img.height = h
-                xl_img.anchor = f"A{row_idx}"   # ✅ Images in column A
+                xl_img.anchor = f"A{row_idx}"
                 ws.add_image(xl_img)
                 ws.row_dimensions[row_idx].height = ROW_HEIGHT_PT
                 processed += 1
@@ -102,6 +112,24 @@ def process_and_callback(excel_bytes, filename, callback_url):
             finally:
                 del img_bytes
                 gc.collect()
+
+        # ✅ Auto-width all columns based on content
+        for col_idx in range(1, ws.max_column + 1):
+            col_letter = get_column_letter(col_idx)
+
+            # Column A is the Image column — keep fixed width
+            if col_letter == IMAGE_COL:
+                ws.column_dimensions[col_letter].width = COL_A_WIDTH
+                continue
+
+            # All other columns — auto fit based on max content length
+            max_length = 0
+            for cell in ws[col_letter]:
+                if cell.value:
+                    max_length = max(max_length, len(str(cell.value)))
+
+            # Add padding, cap at 50 to avoid extremely wide columns
+            ws.column_dimensions[col_letter].width = min(max_length + 4, 50)
 
         # ✅ Apply auto filter across full data range
         last_col           = get_column_letter(ws.max_column)
@@ -161,7 +189,7 @@ def embed_images():
         excel_bytes = base64.b64decode(excel_b64)
         logging.info(f"Decoded excel_bytes size: {len(excel_bytes)} bytes")
 
-        # ✅ Loop until valid xlsx (handles any encoding depth)
+        # ✅ Loop until valid xlsx found
         for attempt in range(4):
             if excel_bytes.startswith(b'PK\x03\x04'):
                 logging.info(f"Valid xlsx after {attempt + 1} decode(s), size: {len(excel_bytes)} bytes")
