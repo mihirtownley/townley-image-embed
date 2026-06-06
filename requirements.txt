@@ -1,5 +1,5 @@
-flask
-openpyxl>=3.1.2
-Pillow>=10.0.0
-requests>=2.31.0
-gunicorn
+flask==3.0.3
+openpyxl==3.1.2
+Pillow==10.3.0
+requests==2.31.0
+gunicorn==21.2.0
