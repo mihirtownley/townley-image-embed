@@ -105,5 +105,14 @@ def embed_images():
         "skipped"   : skipped
     }), 200
 
+# ── Health Check ──────────────────────────────────────────────────────────────
+@app.route("/", methods=["GET"])
+def health_check():
+    return jsonify({
+        "status"  : "✅ Townley Image Embedder is Live",
+        "endpoint": "/embed_images (POST only)",
+        "usage"   : "Send Excel file as base64 JSON via POST request"
+    }), 200
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
