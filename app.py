@@ -19,19 +19,22 @@ logging.basicConfig(level=logging.INFO)
 
 STYLE_COL       = 2
 IMAGE_COL       = "A"
-ROW_HEIGHT_PT   = 60
-COL_A_WIDTH     = 12
+ROW_HEIGHT_PT   = 72              # ✅ 72pt = 1 inch
+COL_A_WIDTH     = 18              # ✅ Column A width = 18 Excel units
 IMAGE_URL_BASE  = "https://app.townleygirl.com/Image/preview/"
 REQUEST_TIMEOUT = 6
-ROW_HEIGHT_PX   = int(ROW_HEIGHT_PT * 96 / 72)
-COL_A_WIDTH_PX  = int(COL_A_WIDTH * 7)
+ROW_HEIGHT_PX   = int(ROW_HEIGHT_PT * 96 / 72)   # 96px
+COL_A_WIDTH_PX  = int(COL_A_WIDTH * 7)            # 126px
 PADDING_PX      = 2
 
 def fix_image_anchors(xlsx_bytes):
     """
-    Post-process xlsx to convert oneCellAnchor → twoCellAnchor(twoCell)
-    so images FILL cells and HIDE when rows are filtered.
-    Uses only Python built-ins (zipfile + re) — no lxml needed.
+    Post-process xlsx to convert oneCellAnchor → twoCellAnchor
+    with editAs='twoCell' so images:
+      ✅ Fill the cell completely
+      ✅ Move AND hide with cell when filtered
+      ✅ 'Move and size with cells' selected in Excel Format Picture
+    Uses only Python built-ins — no lxml needed.
     """
     try:
         in_buf  = io.BytesIO(xlsx_bytes)
@@ -50,7 +53,7 @@ def fix_image_anchors(xlsx_bytes):
                         def convert_anchor(match):
                             content = match.group(1)
 
-                            # Extract <xdr:from> element
+                            # Extract <xdr:from> block
                             from_m = re.search(
                                 r'<xdr:from>(.*?)</xdr:from>',
                                 content, re.DOTALL
@@ -68,7 +71,7 @@ def fix_image_anchors(xlsx_bytes):
                             from_col = int(col_m.group(1))
                             from_row = int(row_m.group(1))
 
-                            # ✅ New from — zero offsets (image starts at cell corner)
+                            # ✅ Clean from — zero offsets (image starts at cell corner)
                             new_from = (
                                 f'<xdr:from>'
                                 f'<xdr:col>{from_col}</xdr:col>'
@@ -78,7 +81,7 @@ def fix_image_anchors(xlsx_bytes):
                                 f'</xdr:from>'
                             )
 
-                            # ✅ New to — next col + row (fills exactly 1 cell)
+                            # ✅ to — next col + row (fills exactly 1 cell)
                             new_to = (
                                 f'<xdr:to>'
                                 f'<xdr:col>{from_col + 1}</xdr:col>'
@@ -95,24 +98,26 @@ def fix_image_anchors(xlsx_bytes):
                                 content[from_m.end():]
                             )
 
-                            # Remove <xdr:ext .../> (not used in twoCellAnchor)
+                            # Remove <xdr:ext .../> — not used in twoCellAnchor
                             content = re.sub(r'\s*<xdr:ext[^>]*/>', '', content)
 
+                            # ✅ editAs="twoCell" = "Move and size with cells" in Excel
                             return (
                                 f'<xdr:twoCellAnchor editAs="twoCell">'
                                 f'{content}'
                                 f'</xdr:twoCellAnchor>'
                             )
 
+                        before_count = xml_str.count('<xdr:oneCellAnchor>')
                         xml_str = re.sub(
                             r'<xdr:oneCellAnchor>(.*?)</xdr:oneCellAnchor>',
                             convert_anchor,
                             xml_str,
                             flags=re.DOTALL
                         )
-
+                        after_count = xml_str.count('<xdr:twoCellAnchor')
+                        logging.info(f"Anchors converted: {before_count} oneCellAnchor → {after_count} twoCellAnchor ✅")
                         data = xml_str.encode('utf-8')
-                        logging.info("Drawing anchors → twoCellAnchor ✅")
 
                     except Exception as e:
                         logging.warning(f"Drawing XML fix skipped: {e}")
@@ -123,7 +128,7 @@ def fix_image_anchors(xlsx_bytes):
         result = out_buf.read()
 
         if result.startswith(b'PK\x03\x04'):
-            logging.info(f"Anchor fix complete ✅ size: {len(result)} bytes")
+            logging.info(f"Anchor fix complete ✅ output size: {len(result)} bytes")
             return result
         else:
             logging.warning("Anchor fix produced invalid zip — using original")
@@ -132,7 +137,6 @@ def fix_image_anchors(xlsx_bytes):
     except Exception as e:
         logging.warning(f"Anchor fix failed — using original: {e}")
         return xlsx_bytes
-
 
 def download_and_resize(style_str):
     try:
@@ -163,7 +167,6 @@ def download_and_resize(style_str):
     finally:
         gc.collect()
 
-
 def process_and_callback(excel_bytes, filename, callback_url):
     try:
         logging.info(f"Received file size: {len(excel_bytes)} bytes")
@@ -182,7 +185,7 @@ def process_and_callback(excel_bytes, filename, callback_url):
         ws.insert_cols(1)
         ws['A1'] = "Image"
 
-        # ✅ Bold all header cells
+        # ✅ Bold all header cells in row 1
         for cell in ws[1]:
             cell.font = Font(bold=True)
 
@@ -209,14 +212,11 @@ def process_and_callback(excel_bytes, filename, callback_url):
 
             try:
                 xl_img        = XLImage(io.BytesIO(img_bytes))
-
-                # ✅ Set image to FULL cell size (twoCellAnchor will fill the cell)
-                xl_img.width  = COL_A_WIDTH_PX
-                xl_img.height = ROW_HEIGHT_PX
-
+                xl_img.width  = COL_A_WIDTH_PX    # ✅ Full cell width
+                xl_img.height = ROW_HEIGHT_PX      # ✅ Full cell height
                 xl_img.anchor = f"A{row_idx}"
                 ws.add_image(xl_img)
-                ws.row_dimensions[row_idx].height = ROW_HEIGHT_PT
+                ws.row_dimensions[row_idx].height = ROW_HEIGHT_PT   # ✅ 72pt row height
                 processed += 1
             except Exception as e:
                 logging.warning(f"Embed failed for {style_str}: {e}")
@@ -237,11 +237,11 @@ def process_and_callback(excel_bytes, filename, callback_url):
                     max_length = max(max_length, len(str(cell.value)))
             ws.column_dimensions[col_letter].width = min(max_length + 4, 50)
 
-        # ✅ Auto filter
+        # ✅ Auto filter across full data range
         last_col           = get_column_letter(ws.max_column)
         ws.auto_filter.ref = f"A1:{last_col}{ws.max_row}"
 
-        # ✅ Save
+        # ✅ Save workbook
         logging.info("Saving workbook...")
         out_buf = io.BytesIO()
         wb.save(out_buf)
@@ -255,7 +255,7 @@ def process_and_callback(excel_bytes, filename, callback_url):
         else:
             logging.error("Output xlsx INVALID ❌")
 
-        # ✅ Fix anchors: oneCellAnchor → twoCellAnchor for fill + filter behavior
+        # ✅ Fix anchors → editAs='twoCell' = "Move and size with cells"
         output_bytes = fix_image_anchors(output_bytes)
 
         result_b64 = base64.b64encode(output_bytes).decode("utf-8")
@@ -277,7 +277,6 @@ def process_and_callback(excel_bytes, filename, callback_url):
 
     except Exception as e:
         logging.error(f"Background processing failed: {e}", exc_info=True)
-
 
 @app.route("/embed_images", methods=["POST"])
 def embed_images():
@@ -319,14 +318,12 @@ def embed_images():
 
     return jsonify({"status": "accepted", "message": "Processing started"}), 202
 
-
 @app.route("/", methods=["GET"])
 def health_check():
     return jsonify({
         "status"  : "Townley Image Embedder is Live",
         "endpoint": "/embed_images (POST only)"
     }), 200
-
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
