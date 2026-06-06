@@ -3,4 +3,4 @@ openpyxl==3.1.5
 pillow==11.2.1
 requests==2.32.3
 gunicorn==23.0.0
-XlsxWriter==3.2.3
+xlsxwriter==3.2.3
