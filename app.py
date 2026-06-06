@@ -15,7 +15,7 @@ app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 
 STYLE_COL_IDX   = 0
-IMAGE_COL_WIDTH = 18
+IMAGE_COL_WIDTH = 14
 ROW_HEIGHT_PT   = 72
 IMAGE_URL_BASE  = "https://app.townleygirl.com/Image/preview/"
 REQUEST_TIMEOUT = 6
