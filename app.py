@@ -1,4 +1,5 @@
 from flask import Flask, request, jsonify
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import base64
 import io
 import logging
@@ -9,22 +10,34 @@ from PIL import Image as PILImage
 
 app = Flask(__name__)
 
-STYLE_COL      = 1
-IMAGE_COL      = "B"
-ROW_HEIGHT_PT  = 72
-COL_B_WIDTH    = 14
-IMAGE_URL_BASE = "https://app.townleygirl.com/Image/preview/"
-REQUEST_TIMEOUT= 20
-ROW_HEIGHT_PX  = int(ROW_HEIGHT_PT * 96 / 72)
-COL_B_WIDTH_PX = int(COL_B_WIDTH * 7)
-PADDING_PX     = 4
+STYLE_COL       = 1
+IMAGE_COL       = "B"
+ROW_HEIGHT_PT   = 72
+COL_B_WIDTH     = 14
+IMAGE_URL_BASE  = "https://app.townleygirl.com/Image/preview/"
+REQUEST_TIMEOUT = 8
+ROW_HEIGHT_PX   = int(ROW_HEIGHT_PT * 96 / 72)
+COL_B_WIDTH_PX  = int(COL_B_WIDTH * 7)
+PADDING_PX      = 4
+
+
+def fetch_image(args):
+    row_idx, style_str = args
+    img_url = f"{IMAGE_URL_BASE}{style_str}"
+    try:
+        resp = requests.get(img_url, timeout=REQUEST_TIMEOUT)
+        resp.raise_for_status()
+        return row_idx, style_str, resp.content, None
+    except Exception as e:
+        return row_idx, style_str, None, str(e)
+
 
 @app.route("/embed_images", methods=["POST"])
 def embed_images():
     try:
-        body       = request.get_json()
-        excel_b64  = body.get("file")
-        filename   = body.get("filename", "report.xlsx")
+        body      = request.get_json(force=True)
+        excel_b64 = body.get("file")
+        filename  = body.get("filename", "report.xlsx")
     except Exception as e:
         return jsonify({"error": f"Invalid request: {e}"}), 400
 
@@ -40,35 +53,42 @@ def embed_images():
 
     ws.column_dimensions[IMAGE_COL].width = COL_B_WIDTH
 
-    processed = 0
-    skipped   = 0
-
+    rows_to_process = []
     for row_idx in range(2, ws.max_row + 1):
         style_val = ws.cell(row=row_idx, column=STYLE_COL).value
         if style_val is None or str(style_val).strip() == "":
             continue
+        rows_to_process.append((row_idx, str(style_val).strip()))
 
-        style_str = str(style_val).strip()
-        img_url   = f"{IMAGE_URL_BASE}{style_str}"
+    processed = 0
+    skipped   = 0
+    results   = {}
 
-        try:
-            resp = requests.get(img_url, timeout=REQUEST_TIMEOUT)
-            resp.raise_for_status()
-        except Exception as e:
-            logging.warning(f"Could not download image for {style_str}: {e}")
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        futures = {
+            executor.submit(fetch_image, row): row
+            for row in rows_to_process
+        }
+        for future in as_completed(futures):
+            row_idx, style_str, content, error = future.result()
+            results[row_idx] = (style_str, content, error)
+
+    for row_idx, (style_str, content, error) in sorted(results.items()):
+        if error or content is None:
+            logging.warning(f"Skipped {style_str}: {error}")
             skipped += 1
             continue
 
         try:
-            pil_img        = PILImage.open(io.BytesIO(resp.content)).convert("RGBA")
+            pil_img        = PILImage.open(io.BytesIO(content)).convert("RGBA")
             orig_w, orig_h = pil_img.size
-            max_w  = COL_B_WIDTH_PX - (PADDING_PX * 2)
-            max_h  = ROW_HEIGHT_PX  - (PADDING_PX * 2)
-            scale  = min(max_w / orig_w, max_h / orig_h, 1.0)
-            new_w  = max(1, int(orig_w * scale))
-            new_h  = max(1, int(orig_h * scale))
-            pil_img = pil_img.resize((new_w, new_h), PILImage.LANCZOS)
-            png_buf = io.BytesIO()
+            max_w          = COL_B_WIDTH_PX - (PADDING_PX * 2)
+            max_h          = ROW_HEIGHT_PX  - (PADDING_PX * 2)
+            scale          = min(max_w / orig_w, max_h / orig_h, 1.0)
+            new_w          = max(1, int(orig_w * scale))
+            new_h          = max(1, int(orig_h * scale))
+            pil_img        = pil_img.resize((new_w, new_h), PILImage.LANCZOS)
+            png_buf        = io.BytesIO()
             pil_img.save(png_buf, format="PNG", optimize=True)
             png_buf.seek(0)
         except Exception as e:
@@ -105,14 +125,14 @@ def embed_images():
         "skipped"   : skipped
     }), 200
 
-# ── Health Check ──────────────────────────────────────────────────────────────
+
 @app.route("/", methods=["GET"])
 def health_check():
     return jsonify({
-        "status"  : "✅ Townley Image Embedder is Live",
-        "endpoint": "/embed_images (POST only)",
-        "usage"   : "Send Excel file as base64 JSON via POST request"
+        "status"  : "Townley Image Embedder is Live",
+        "endpoint": "/embed_images (POST only)"
     }), 200
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
