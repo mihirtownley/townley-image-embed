@@ -15,8 +15,8 @@ app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 
 STYLE_COL_IDX   = 0
-IMAGE_COL_WIDTH = 14
-ROW_HEIGHT_PT   = 72
+IMAGE_COL_WIDTH = 18          # ✅ Updated: was 14
+ROW_HEIGHT_PT   = 75          # ✅ Updated: was 72
 IMAGE_URL_BASE  = "https://app.townleygirl.com/Image/preview/"
 REQUEST_TIMEOUT = 6
 IMG_SIZE_PX = 120
@@ -124,6 +124,19 @@ def process_and_callback(excel_bytes, filename, callback_url):
         for col_idx, width in enumerate(col_widths):
             sheet.set_column(col_idx + 1, col_idx + 1, width)
 
+        # ── Helper: calculate centered x_offset and y_offset for embed_image ─
+        # XlsxWriter column width unit ≈ 7.5 px per character; row height in pt (1 pt ≈ 1.333 px)
+        COL_WIDTH_PX  = IMAGE_COL_WIDTH * 7.5   # approx pixel width of the image column
+        ROW_HEIGHT_PX = ROW_HEIGHT_PT * 1.333   # approx pixel height of each data row
+        IMG_DISPLAY   = IMG_SIZE_PX              # image is already IMG_SIZE_PX × IMG_SIZE_PX
+
+        # Clamp so image is never larger than the cell
+        img_w = min(IMG_DISPLAY, int(COL_WIDTH_PX)  - 4)
+        img_h = min(IMG_DISPLAY, int(ROW_HEIGHT_PX) - 4)
+
+        x_offset = max(0, int((COL_WIDTH_PX  - img_w) / 2))
+        y_offset = max(0, int((ROW_HEIGHT_PX - img_h) / 2))
+
         # Data rows with embedded images
         for row_idx, row_data in enumerate(all_rows, start=1):
             sheet.set_row(row_idx, ROW_HEIGHT_PT)
@@ -134,9 +147,13 @@ def process_and_callback(excel_bytes, filename, callback_url):
                 img_bytes = images.get(style_str)
                 if img_bytes:
                     try:
-                        # ✅ .jpg extension tells XlsxWriter to treat as JPEG
+                        # ✅ Centered: x_offset / y_offset push image to cell center
                         sheet.embed_image(row_idx, 0, "image.jpg", {
-                            'image_data': io.BytesIO(img_bytes)
+                            'image_data' : io.BytesIO(img_bytes),
+                            'x_offset'   : x_offset,   # ✅ horizontal center
+                            'y_offset'   : y_offset,   # ✅ vertical center
+                            'x_scale'    : img_w / IMG_DISPLAY,
+                            'y_scale'    : img_h / IMG_DISPLAY,
                         })
                     except Exception as e:
                         logging.warning(f"embed_image failed for {style_str}: {e}")
