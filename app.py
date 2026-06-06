@@ -19,8 +19,8 @@ logging.basicConfig(level=logging.INFO)
 
 STYLE_COL       = 2
 IMAGE_COL       = "A"
-ROW_HEIGHT_PT   = 72              # ✅ 72pt = 1 inch
-COL_A_WIDTH     = 18              # ✅ Column A width = 18 Excel units
+ROW_HEIGHT_PT   = 72
+COL_A_WIDTH     = 18
 IMAGE_URL_BASE  = "https://app.townleygirl.com/Image/preview/"
 REQUEST_TIMEOUT = 6
 ROW_HEIGHT_PX   = int(ROW_HEIGHT_PT * 96 / 72)   # 96px
@@ -29,12 +29,12 @@ PADDING_PX      = 2
 
 def fix_image_anchors(xlsx_bytes):
     """
-    Post-process xlsx to convert oneCellAnchor → twoCellAnchor
-    with editAs='twoCell' so images:
-      ✅ Fill the cell completely
-      ✅ Move AND hide with cell when filtered
-      ✅ 'Move and size with cells' selected in Excel Format Picture
-    Uses only Python built-ins — no lxml needed.
+    Converts oneCellAnchor → twoCellAnchor with editAs='twoCell'
+    = 'Move and size with cells' in Excel Format Picture dialog.
+
+    KEY FIX: openpyxl uses NO namespace prefix in drawing XML.
+    Tags are <oneCellAnchor> NOT <xdr:oneCellAnchor>.
+    Previous code was matching wrong prefix — this is now corrected.
     """
     try:
         in_buf  = io.BytesIO(xlsx_bytes)
@@ -53,17 +53,14 @@ def fix_image_anchors(xlsx_bytes):
                         def convert_anchor(match):
                             content = match.group(1)
 
-                            # Extract <xdr:from> block
-                            from_m = re.search(
-                                r'<xdr:from>(.*?)</xdr:from>',
-                                content, re.DOTALL
-                            )
+                            # ✅ No prefix — openpyxl uses default namespace
+                            from_m = re.search(r'<from>(.*?)</from>', content, re.DOTALL)
                             if not from_m:
                                 return match.group(0)
 
                             from_content = from_m.group(1)
-                            col_m = re.search(r'<xdr:col>(\d+)</xdr:col>', from_content)
-                            row_m = re.search(r'<xdr:row>(\d+)</xdr:row>', from_content)
+                            col_m = re.search(r'<col>(\d+)</col>', from_content)
+                            row_m = re.search(r'<row>(\d+)</row>', from_content)
 
                             if not col_m or not row_m:
                                 return match.group(0)
@@ -71,52 +68,43 @@ def fix_image_anchors(xlsx_bytes):
                             from_col = int(col_m.group(1))
                             from_row = int(row_m.group(1))
 
-                            # ✅ Clean from — zero offsets (image starts at cell corner)
+                            # Clean from — zero offsets
                             new_from = (
-                                f'<xdr:from>'
-                                f'<xdr:col>{from_col}</xdr:col>'
-                                f'<xdr:colOff>0</xdr:colOff>'
-                                f'<xdr:row>{from_row}</xdr:row>'
-                                f'<xdr:rowOff>0</xdr:rowOff>'
-                                f'</xdr:from>'
+                                f'<from>'
+                                f'<col>{from_col}</col><colOff>0</colOff>'
+                                f'<row>{from_row}</row><rowOff>0</rowOff>'
+                                f'</from>'
                             )
 
-                            # ✅ to — next col + row (fills exactly 1 cell)
+                            # Add to — next col + row = fills 1 cell exactly
                             new_to = (
-                                f'<xdr:to>'
-                                f'<xdr:col>{from_col + 1}</xdr:col>'
-                                f'<xdr:colOff>0</xdr:colOff>'
-                                f'<xdr:row>{from_row + 1}</xdr:row>'
-                                f'<xdr:rowOff>0</xdr:rowOff>'
-                                f'</xdr:to>'
+                                f'<to>'
+                                f'<col>{from_col + 1}</col><colOff>0</colOff>'
+                                f'<row>{from_row + 1}</row><rowOff>0</rowOff>'
+                                f'</to>'
                             )
 
-                            # Replace old from with new from + to
                             content = (
                                 content[:from_m.start()] +
                                 new_from + new_to +
                                 content[from_m.end():]
                             )
 
-                            # Remove <xdr:ext .../> — not used in twoCellAnchor
-                            content = re.sub(r'\s*<xdr:ext[^>]*/>', '', content)
+                            # Remove <ext .../> — not used in twoCellAnchor
+                            content = re.sub(r'\s*<ext[^>]*/>', '', content)
 
-                            # ✅ editAs="twoCell" = "Move and size with cells" in Excel
-                            return (
-                                f'<xdr:twoCellAnchor editAs="twoCell">'
-                                f'{content}'
-                                f'</xdr:twoCellAnchor>'
-                            )
+                            # ✅ editAs="twoCell" = "Move and size with cells"
+                            return f'<twoCellAnchor editAs="twoCell">{content}</twoCellAnchor>'
 
-                        before_count = xml_str.count('<xdr:oneCellAnchor>')
+                        before = xml_str.count('<oneCellAnchor>')
                         xml_str = re.sub(
-                            r'<xdr:oneCellAnchor>(.*?)</xdr:oneCellAnchor>',
+                            r'<oneCellAnchor>(.*?)</oneCellAnchor>',
                             convert_anchor,
                             xml_str,
                             flags=re.DOTALL
                         )
-                        after_count = xml_str.count('<xdr:twoCellAnchor')
-                        logging.info(f"Anchors converted: {before_count} oneCellAnchor → {after_count} twoCellAnchor ✅")
+                        after = xml_str.count('<twoCellAnchor')
+                        logging.info(f"Anchors fixed: {before} oneCellAnchor → {after} twoCellAnchor ✅")
                         data = xml_str.encode('utf-8')
 
                     except Exception as e:
@@ -128,7 +116,7 @@ def fix_image_anchors(xlsx_bytes):
         result = out_buf.read()
 
         if result.startswith(b'PK\x03\x04'):
-            logging.info(f"Anchor fix complete ✅ output size: {len(result)} bytes")
+            logging.info(f"Anchor fix complete ✅ size: {len(result)} bytes")
             return result
         else:
             logging.warning("Anchor fix produced invalid zip — using original")
@@ -185,7 +173,7 @@ def process_and_callback(excel_bytes, filename, callback_url):
         ws.insert_cols(1)
         ws['A1'] = "Image"
 
-        # ✅ Bold all header cells in row 1
+        # ✅ Bold all header cells
         for cell in ws[1]:
             cell.font = Font(bold=True)
 
@@ -212,11 +200,11 @@ def process_and_callback(excel_bytes, filename, callback_url):
 
             try:
                 xl_img        = XLImage(io.BytesIO(img_bytes))
-                xl_img.width  = COL_A_WIDTH_PX    # ✅ Full cell width
-                xl_img.height = ROW_HEIGHT_PX      # ✅ Full cell height
+                xl_img.width  = COL_A_WIDTH_PX
+                xl_img.height = ROW_HEIGHT_PX
                 xl_img.anchor = f"A{row_idx}"
                 ws.add_image(xl_img)
-                ws.row_dimensions[row_idx].height = ROW_HEIGHT_PT   # ✅ 72pt row height
+                ws.row_dimensions[row_idx].height = ROW_HEIGHT_PT
                 processed += 1
             except Exception as e:
                 logging.warning(f"Embed failed for {style_str}: {e}")
@@ -225,7 +213,7 @@ def process_and_callback(excel_bytes, filename, callback_url):
                 del img_bytes
                 gc.collect()
 
-        # ✅ Auto-width all columns based on content
+        # ✅ Auto-width all columns
         for col_idx in range(1, ws.max_column + 1):
             col_letter = get_column_letter(col_idx)
             if col_letter == IMAGE_COL:
@@ -237,11 +225,11 @@ def process_and_callback(excel_bytes, filename, callback_url):
                     max_length = max(max_length, len(str(cell.value)))
             ws.column_dimensions[col_letter].width = min(max_length + 4, 50)
 
-        # ✅ Auto filter across full data range
+        # ✅ Auto filter
         last_col           = get_column_letter(ws.max_column)
         ws.auto_filter.ref = f"A1:{last_col}{ws.max_row}"
 
-        # ✅ Save workbook
+        # ✅ Save
         logging.info("Saving workbook...")
         out_buf = io.BytesIO()
         wb.save(out_buf)
@@ -255,7 +243,7 @@ def process_and_callback(excel_bytes, filename, callback_url):
         else:
             logging.error("Output xlsx INVALID ❌")
 
-        # ✅ Fix anchors → editAs='twoCell' = "Move and size with cells"
+        # ✅ Fix anchors — oneCellAnchor → twoCellAnchor (no xdr: prefix)
         output_bytes = fix_image_anchors(output_bytes)
 
         result_b64 = base64.b64encode(output_bytes).decode("utf-8")
