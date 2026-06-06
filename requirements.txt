@@ -3,4 +3,3 @@ openpyxl
 pillow
 requests
 gunicorn
-lxml

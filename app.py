@@ -5,8 +5,6 @@ import logging
 import threading
 import requests
 import os
-import zipfile
-from lxml import etree
 from flask import Flask, request, jsonify
 from openpyxl import load_workbook
 from openpyxl.drawing.image import Image as XLImage
@@ -55,80 +53,20 @@ def download_and_resize(style_str):
     finally:
         gc.collect()
 
-def fix_image_anchors(xlsx_bytes):
-    """
-    Post-process the xlsx file to change all oneCellAnchor elements
-    to use editAs='oneCell' so images move and hide with rows when filtered.
-    """
-    try:
-        in_buf  = io.BytesIO(xlsx_bytes)
-        out_buf = io.BytesIO()
-
-        with zipfile.ZipFile(in_buf, 'r') as zin, \
-             zipfile.ZipFile(out_buf, 'w', zipfile.ZIP_DEFLATED) as zout:
-
-            for item in zin.infolist():
-                data = zin.read(item.filename)
-
-                # Only modify drawing XML files
-                if item.filename.startswith('xl/drawings/drawing') and item.filename.endswith('.xml'):
-                    try:
-                        tree = etree.fromstring(data)
-                        ns   = 'http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing'
-
-                        # Change oneCellAnchor → twoCellAnchor with editAs="oneCell"
-                        for anchor in tree.findall(f'{{{ns}}}oneCellAnchor'):
-                            # Get existing from marker and image size
-                            from_el = anchor.find(f'{{{ns}}}from')
-                            ext_el  = anchor.find(f'{{{ns}}}ext')
-
-                            if from_el is not None and ext_el is not None:
-                                # Build a to marker from from + ext
-                                from_col    = int(from_el.find(f'{{{ns}}}col').text)
-                                from_row    = int(from_el.find(f'{{{ns}}}row').text)
-
-                                to_el       = etree.SubElement(anchor, f'{{{ns}}}to')
-                                to_col      = etree.SubElement(to_el, f'{{{ns}}}col')
-                                to_col.text = str(from_col + 1)
-                                to_colOff   = etree.SubElement(to_el, f'{{{ns}}}colOff')
-                                to_colOff.text = '0'
-                                to_row      = etree.SubElement(to_el, f'{{{ns}}}row')
-                                to_row.text = str(from_row + 1)
-                                to_rowOff   = etree.SubElement(to_el, f'{{{ns}}}rowOff')
-                                to_rowOff.text = '0'
-
-                                # Remove ext element (not used in twoCellAnchor)
-                                anchor.remove(ext_el)
-
-                            # Rename tag to twoCellAnchor and add editAs
-                            anchor.tag      = f'{{{ns}}}twoCellAnchor'
-                            anchor.set('editAs', 'oneCell')
-
-                        data = etree.tostring(tree, xml_declaration=True,
-                                              encoding='UTF-8', standalone=True)
-                    except Exception as e:
-                        logging.warning(f"Drawing XML fix skipped: {e}")
-
-                zout.writestr(item, data)
-
-        out_buf.seek(0)
-        return out_buf.read()
-
-    except Exception as e:
-        logging.warning(f"Anchor fix failed, returning original: {e}")
-        return xlsx_bytes
-
 def process_and_callback(excel_bytes, filename, callback_url):
     try:
+        # ✅ Step 1 — Log received file size for debugging
+        logging.info(f"Received file size: {len(excel_bytes)} bytes")
+
         wb = load_workbook(io.BytesIO(excel_bytes))
         ws = wb.active
         del excel_bytes
         gc.collect()
 
-        # ✅ Freeze header row
+        # ✅ Step 2 — Freeze header row
         ws.freeze_panes = "A2"
 
-        # ✅ Set column B width
+        # ✅ Step 3 — Set column B width
         ws.column_dimensions[IMAGE_COL].width = COL_B_WIDTH
 
         processed = 0
@@ -150,7 +88,7 @@ def process_and_callback(excel_bytes, filename, callback_url):
                 xl_img        = XLImage(io.BytesIO(img_bytes))
                 xl_img.width  = w
                 xl_img.height = h
-                xl_img.anchor = f"B{row_idx}"   # ✅ Safe string anchor
+                xl_img.anchor = f"B{row_idx}"
                 ws.add_image(xl_img)
                 ws.row_dimensions[row_idx].height = ROW_HEIGHT_PT
                 processed += 1
@@ -161,29 +99,25 @@ def process_and_callback(excel_bytes, filename, callback_url):
                 del img_bytes
                 gc.collect()
 
-        # ✅ Apply auto filter across full data range
+        # ✅ Step 4 — Apply auto filter
         last_col           = get_column_letter(ws.max_column)
         ws.auto_filter.ref = f"A1:{last_col}{ws.max_row}"
 
-        # ✅ Save workbook to bytes
+        # ✅ Step 5 — Save workbook
+        logging.info("Saving workbook...")
         out_buf = io.BytesIO()
         wb.save(out_buf)
         out_buf.seek(0)
-        xlsx_bytes = out_buf.read()
+        result_b64 = base64.b64encode(out_buf.read()).decode("utf-8")
+        logging.info(f"Saved. Base64 length: {len(result_b64)}")
         del wb
         gc.collect()
 
-        # ✅ Fix image anchors via XML post-processing
-        xlsx_bytes = fix_image_anchors(xlsx_bytes)
-
-        result_b64 = base64.b64encode(xlsx_bytes).decode("utf-8")
-        del xlsx_bytes
-        gc.collect()
-
-        # ✅ Ensure .xlsx extension
+        # ✅ Step 6 — Ensure .xlsx extension
         if not filename.lower().endswith(".xlsx"):
             filename = filename + ".xlsx"
 
+        # ✅ Step 7 — Callback to Flow 2
         payload = {
             "file"      : result_b64,
             "filename"  : filename,
@@ -194,7 +128,7 @@ def process_and_callback(excel_bytes, filename, callback_url):
         logging.info(f"Callback status: {resp.status_code}, processed={processed}, skipped={skipped}")
 
     except Exception as e:
-        logging.error(f"Background processing failed: {e}")
+        logging.error(f"Background processing failed: {e}", exc_info=True)
 
 @app.route("/embed_images", methods=["POST"])
 def embed_images():
@@ -215,6 +149,9 @@ def embed_images():
         excel_bytes = base64.b64decode(excel_b64)
     except Exception as e:
         return jsonify({"error": f"Base64 decode failed: {e}"}), 422
+
+    # ✅ Log decoded size immediately
+    logging.info(f"Decoded excel_bytes size: {len(excel_bytes)} bytes")
 
     thread = threading.Thread(
         target=process_and_callback,
