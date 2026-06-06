@@ -149,16 +149,17 @@ def embed_images():
         excel_bytes = base64.b64decode(excel_b64)
         logging.info(f"Decoded excel_bytes size: {len(excel_bytes)} bytes")
 
-        # ✅ Loop until valid xlsx found (handles any encoding depth)
+        # ✅ Loop until valid xlsx found — handles any encoding depth
+        # Valid xlsx/zip always starts with PK magic bytes (0x50 0x4B 0x03 0x04)
         for attempt in range(4):
             if excel_bytes.startswith(b'PK\x03\x04'):
-                logging.info(f"Valid xlsx after {attempt + 1} decode(s), size: {len(excel_bytes)} bytes")
+                logging.info(f"Valid xlsx confirmed after {attempt + 1} decode(s), size: {len(excel_bytes)} bytes")
                 break
-            logging.info(f"Attempt {attempt + 1}: not valid xlsx yet, decoding again...")
+            logging.info(f"Attempt {attempt + 1}: not valid xlsx yet (starts with {excel_bytes[:4]}), decoding again...")
             excel_bytes = base64.b64decode(excel_bytes)
         else:
             logging.error("Could not find valid xlsx after 4 decode attempts")
-            return jsonify({"error": "Could not decode xlsx file"}), 422
+            return jsonify({"error": "Could not decode xlsx file after 4 attempts"}), 422
 
     except Exception as e:
         return jsonify({"error": f"Base64 decode failed: {e}"}), 422
