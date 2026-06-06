@@ -1,5 +1,6 @@
 flask
 openpyxl
-Pillow
+pillow
 requests
 gunicorn
+lxml
