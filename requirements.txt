@@ -3,3 +3,4 @@ openpyxl
 pillow
 requests
 gunicorn
+XlsxWriter
