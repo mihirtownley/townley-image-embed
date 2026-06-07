@@ -148,23 +148,44 @@ def process_and_callback(excel_bytes, filename, callback_url):
 
             style_val = row_data[STYLE_COL_IDX]
             if style_val:
-                style_str = str(style_val).strip()
-                img_bytes = images.get(style_str)
-                if img_bytes:
-                    try:
-                        # ✅ Embed raw JPEG bytes directly — no re-encoding, no size inflation
-                        # ✅ object_position=1 → move & size with cell
-                        # ✅ x_scale / y_scale → fit image to cell dimensions
-                        sheet.embed_image(row_idx, 0, "image.jpg", {
-                            "image_data"     : io.BytesIO(img_bytes),
-                            "x_offset"       : x_offset,
-                            "y_offset"       : y_offset,
-                            "x_scale"        : DISPLAY_W / 96,   # 96 px = PIL default DPI reference
-                            "y_scale"        : DISPLAY_H / 96,
-                            "object_position": 1,                 # move and size with cell
-                        })
-                    except Exception as e:
-                        logging.warning(f"embed_image failed for {style_str}: {e}")
+    style_str = str(style_val).strip()
+    img_bytes = images.get(style_str)
+
+    if img_bytes:
+        try:
+            # Read actual image dimensions
+            with PILImage.open(io.BytesIO(img_bytes)) as img:
+                img_w, img_h = img.size
+
+            # Preserve aspect ratio
+            scale = min(
+                DISPLAY_W / img_w,
+                DISPLAY_H / img_h
+            )
+
+            final_w = img_w * scale
+            final_h = img_h * scale
+
+            # Center image inside cell
+            center_x = max(0, int((DISPLAY_W - final_w) / 2))
+            center_y = max(0, int((DISPLAY_H - final_h) / 2))
+
+            sheet.insert_image(
+                row_idx,
+                0,
+                "image.jpg",
+                {
+                    "image_data": io.BytesIO(img_bytes),
+                    "x_offset": center_x,
+                    "y_offset": center_y,
+                    "x_scale": scale,
+                    "y_scale": scale,
+                    "object_position": 1
+                }
+            )
+
+        except Exception as e:
+            logging.warning(f"insert_image failed for {style_str}: {e}")
 
             for col_idx, value in enumerate(row_data):
                 dest_col = col_idx + 1
