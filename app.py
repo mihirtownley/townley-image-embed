@@ -142,7 +142,7 @@ def process_and_callback(excel_bytes, filename, callback_url):
         y_offset = max(0, int((ROW_HEIGHT_PX - DISPLAY_H) / 2))
         # ─────────────────────────────────────────────────────────────────────
 
-       # Data rows with images
+      # Data rows with images
 for row_idx, row_data in enumerate(all_rows, start=1):
     sheet.set_row(row_idx, ROW_HEIGHT_PT)
 
