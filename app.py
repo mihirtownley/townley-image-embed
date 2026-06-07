@@ -142,63 +142,72 @@ def process_and_callback(excel_bytes, filename, callback_url):
         y_offset = max(0, int((ROW_HEIGHT_PX - DISPLAY_H) / 2))
         # ─────────────────────────────────────────────────────────────────────
 
-        # Data rows with embedded images
-        for row_idx, row_data in enumerate(all_rows, start=1):
-            sheet.set_row(row_idx, ROW_HEIGHT_PT)
+       # Data rows with images
+for row_idx, row_data in enumerate(all_rows, start=1):
+    sheet.set_row(row_idx, ROW_HEIGHT_PT)
 
-            style_val = row_data[STYLE_COL_IDX]
-            if style_val:
-    style_str = str(style_val).strip()
-    img_bytes = images.get(style_str)
+    style_val = row_data[STYLE_COL_IDX]
 
-    if img_bytes:
-        try:
-            # Read actual image dimensions
-            with PILImage.open(io.BytesIO(img_bytes)) as img:
-                img_w, img_h = img.size
+    if style_val:
+        style_str = str(style_val).strip()
+        img_bytes = images.get(style_str)
 
-            # Preserve aspect ratio
-            scale = min(
-                DISPLAY_W / img_w,
-                DISPLAY_H / img_h
-            )
+        if img_bytes:
+            try:
+                # Read actual image dimensions
+                with PILImage.open(io.BytesIO(img_bytes)) as img:
+                    img_w, img_h = img.size
 
-            final_w = img_w * scale
-            final_h = img_h * scale
+                # Preserve aspect ratio
+                scale = min(
+                    DISPLAY_W / img_w,
+                    DISPLAY_H / img_h
+                )
 
-            # Center image inside cell
-            center_x = max(0, int((DISPLAY_W - final_w) / 2))
-            center_y = max(0, int((DISPLAY_H - final_h) / 2))
+                final_w = img_w * scale
+                final_h = img_h * scale
 
-            sheet.insert_image(
-                row_idx,
-                0,
-                "image.jpg",
-                {
-                    "image_data": io.BytesIO(img_bytes),
-                    "x_offset": center_x,
-                    "y_offset": center_y,
-                    "x_scale": scale,
-                    "y_scale": scale,
-                    "object_position": 1
-                }
-            )
+                # Center image inside cell
+                center_x = max(0, int((DISPLAY_W - final_w) / 2))
+                center_y = max(0, int((DISPLAY_H - final_h) / 2))
 
-        except Exception as e:
-            logging.warning(f"insert_image failed for {style_str}: {e}")
+                sheet.insert_image(
+                    row_idx,
+                    0,
+                    "image.jpg",
+                    {
+                        "image_data": io.BytesIO(img_bytes),
+                        "x_offset": center_x,
+                        "y_offset": center_y,
+                        "x_scale": scale,
+                        "y_scale": scale,
+                        "object_position": 1,
+                    }
+                )
 
-            for col_idx, value in enumerate(row_data):
-                dest_col = col_idx + 1
-                if value is None:
-                    sheet.write_blank(row_idx, dest_col, None, cell_fmt)
-                elif isinstance(value, bool):
-                    sheet.write_boolean(row_idx, dest_col, value, cell_fmt)
-                elif isinstance(value, (datetime, date)):
-                    sheet.write_datetime(row_idx, dest_col, value, date_fmt)
-                elif isinstance(value, (int, float)):
-                    sheet.write_number(row_idx, dest_col, value, num_fmt)
-                else:
-                    sheet.write_string(row_idx, dest_col, str(value), cell_fmt)
+            except Exception as e:
+                logging.warning(
+                    f"insert_image failed for {style_str}: {e}"
+                )
+
+    # Write row data
+    for col_idx, value in enumerate(row_data):
+        dest_col = col_idx + 1
+
+        if value is None:
+            sheet.write_blank(row_idx, dest_col, None, cell_fmt)
+
+        elif isinstance(value, bool):
+            sheet.write_boolean(row_idx, dest_col, value, cell_fmt)
+
+        elif isinstance(value, (datetime, date)):
+            sheet.write_datetime(row_idx, dest_col, value, date_fmt)
+
+        elif isinstance(value, (int, float)):
+            sheet.write_number(row_idx, dest_col, value, num_fmt)
+
+        else:
+            sheet.write_string(row_idx, dest_col, str(value), cell_fmt)
 
         sheet.freeze_panes(1, 0)
         sheet.autofilter(0, 0, len(all_rows), num_cols)
