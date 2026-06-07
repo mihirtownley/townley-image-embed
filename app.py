@@ -107,7 +107,7 @@ def process_and_callback(excel_bytes, filename, callback_url):
             col_widths.append(min(max_len + 4, 50))
 
         # ── Build xlsx with XlsxWriter ─────────────────────────────────────────
-        logging.info("Building xlsx with XlsxWriter embed_image()...")
+        logging.info("Building xlsx with XlsxWriter insert_image()...")
 
         tmp_path = "/tmp/xlsxwriter_output.xlsx"
         workbook = xlsxwriter.Workbook(tmp_path)
